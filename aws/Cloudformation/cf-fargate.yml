@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Service Deployment'
+
+Parameters:
+  TaskDefinitionArn:
+    Type: String
+    Description: ARN of the ECS Task Definition
+  ECSServiceName:
+    Type: String
+    Description: ECS Service Name
+  ECSContainerName:
+    Type: String
+    Description: ECS Container Name
+  ContainerPort:
+    Type: Number
+    Description: The container port to be exposed
+  FargateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of Subnet IDs for the Fargate service
+  VPCId:
+    Type: String
+    Description: VPC ID where the ECS service will be deployed
+  TargetGroupArn:
+    Type: String
+    Description: ARN of the Target Group
+  ECSClusterArn:
+    Type: String
+    Description: ARN of the ECS Cluster
+  ALBSecurityGroupArn:
+    Type: String
+    Description: ARN of the ALB Security Group
+  DesiredCount:
+    Type: Number
+    Description: Desired count for the ECS service
+
+Resources:
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for ECS Service"
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref ALBSecurityGroupArn
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: [ECSSecurityGroup]
+    Properties:
+      ServiceName: !Ref ECSServiceName
+      Cluster: !Ref ECSClusterArn
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinitionArn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref FargateSubnetIds
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      DesiredCount: !Ref DesiredCount 
+      LoadBalancers:
+        - ContainerName: !Ref ECSContainerName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroupArn
+
+Outputs:
+  ECSServiceArn:
+    Description: ARN of the deployed ECS Service
+    Value: !Ref ECSService

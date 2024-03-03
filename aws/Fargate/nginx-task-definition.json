@@ -1,0 +1,23 @@
+{
+    "family": "nginx-demo-task",
+    "executionRoleArn": "arn:aws:iam::544167776152:role/ecs-task-execution-role", 
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "256",
+    "memory": "512",
+    "containerDefinitions": [
+      {
+        "name": "nginx-container",
+        "image": "${ECR_REGISTRY_URL}/${ECR_REPOSITORY}:${IMAGE_TAG}",
+        "portMappings": [
+          {
+            "containerPort": 3333,
+            "hostPort": 3333,
+            "protocol": "tcp"
+          }
+        ],
+        "essential": true
+      }
+    ]
+  }
+  

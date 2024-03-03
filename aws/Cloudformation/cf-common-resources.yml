@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Shared resources for ECS services: ECS Cluster and ALB'
+
+Parameters:
+  AWSRegion:
+    Type: String
+    Description: AWS Region
+  ECSClusterName:
+    Type: String
+    Description: ECS Cluster Name
+  VPCId:
+    Type: String
+    Description: VPC ID where the resources will be deployed
+  ExternalSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of Subnet IDs for the external Load Balancer
+  InternalSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of Subnet IDs for the internal Load Balancer
+  LoadBalancerType:
+    Type: String
+    Default: external
+    AllowedValues:
+      - internal
+      - external
+    Description: Type of load balancer to create (internal or external)
+
+Conditions:
+  IsInternal: !Equals [ !Ref LoadBalancerType, "internal" ]
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ECSClusterName
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for ALB"
+      VpcId: !Ref VPCId
+      GroupName: !Sub "${ECSClusterName}-lb-sg"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ECSClusterName}-lb'
+      Scheme: !If [IsInternal, "internal", "internet-facing"]
+      Subnets: !If [IsInternal, !Ref InternalSubnetIds, !Ref ExternalSubnetIds]
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+Outputs:
+  ECSClusterArn:
+    Description: ARN of the ECS Cluster
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSClusterArn"
+
+  LoadBalancerArn:
+    Description: ARN of the Load Balancer
+    Value: !GetAtt LoadBalancer.LoadBalancerArn
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerArn"
+
+  ALBSecurityGroupArn:
+    Description: ARN of the ALB Security Group
+    Value: !GetAtt ALBSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBSecurityGroupArn"

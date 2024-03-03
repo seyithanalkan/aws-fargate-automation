@@ -1,0 +1,344 @@
+name: Fargate Auto Deploy Workflow
+
+on:
+  push:
+    branches: [ "master" ]
+#on: [workflow_dispatch]
+
+env:
+  ######## PROJECT BASED ENVIRONMENT VARIABLES ##########
+
+  ECS_CLUSTER: NGINX-CLUSTER
+
+  ######## ENVIRONMENT BASED ENVIRONMENT VARIABLES #########
+
+  ECS_TASK_DEFINITION: aws/Fargate/nginx-task-definition.json
+
+  ######## SERVICE BASED ENVIRONMENT VARIABLES #########
+
+  ECR_REPOSITORY: nginx-ecr   # Name of the ECR repository
+  ECS_SERVICE: nginx-service   # Name of the ECS service
+  CONTAINER_NAME: nginx-container   # Name of the container within the ECS service
+  LOAD_BALANCER_TYPE: external   # Type of load balancer (internal or external)
+  CONTAINER_PORT: 3333   # Port on which the container listens
+  DIR: nginx   # Directory where the Dockerfile is located
+  TASK_DEF_NAME: nginx-demo-task   # Name of the ECS task definition
+  HOST_HEADER: nginx.seyithanalkan.com   # Host header for routing traffic
+  HEALTH_CHECK_PATH: /healthy   # Path for health check
+  DESIRED_COUNT: 0
+
+  ####### CONSTANT VARIABLES FOR EVERY SERVICE  #############
+
+  AWS_REGION: eu-central-1   # AWS Region where resources are deployed
+  ECR_REGISTRY_URL: 544167776152.dkr.ecr.eu-central-1.amazonaws.com   # ECR Registry URL
+  IMAGE_TAG: ${{ github.sha }}   # Tag for the Docker image
+  EXTERNAL_SUBNET_IDS: 'subnet-0344cee01b31cca1c,subnet-009b3da7a770113d1'   # Subnet IDs for external load balancer
+  INTERNAL_SUBNET_IDS: 'subnet-0a5dedb4221f09736,subnet-0e46dffc165b78f20'   # Subnet IDs for internal load balancer
+  FARGATE_SUBNET_IDS: 'subnet-0a5dedb4221f09736,subnet-0e46dffc165b78f20'    # Subnet IDs for Fargate
+  VPC_ID: 'vpc-093aacb26a671adb5'   # VPC ID where resources are deployed
+  SSL_ARN: arn:aws:acm:eu-central-1:544167776152:certificate/80e0ed23-8abe-4d8c-99fc-590a4189556a  # ARN of SSL certificate for HTTPS listener
+
+  
+  
+  
+  
+  
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create or Verify ECR Repository
+        run: |
+          if ! aws ecr describe-repositories --repository-names $ECR_REPOSITORY; then
+            aws ecr create-repository --repository-name $ECR_REPOSITORY
+          fi
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        run: |
+          cd ${{ env.DIR }}
+          docker build -t $ECR_REGISTRY_URL/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY_URL/$ECR_REPOSITORY:$IMAGE_TAG
+    outputs:
+      job_name: ${{ github.job }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ env.ECR_REGISTRY_URL }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Register Task Definition
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.task-def.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "TASK_DEFINITION_ARN=$TASK_DEF_ARN"
+          echo "::set-output name=task_definition_arn::$TASK_DEF_ARN"
+
+      - name: Deploy Shared Resources to AWS CloudFormation
+        run: |
+          aws cloudformation deploy \
+            --template-file aws/Cloudformation/cf-common-resources.yml \
+            --stack-name ${{ env.ECS_CLUSTER }}-stack \
+            --parameter-overrides \
+              AWSRegion=${{ env.AWS_REGION }} \
+              ECSClusterName=${{ env.ECS_CLUSTER }} \
+              VPCId=${{ env.VPC_ID }} \
+              ExternalSubnetIds=${{ env.EXTERNAL_SUBNET_IDS }} \
+              InternalSubnetIds=${{ env.INTERNAL_SUBNET_IDS }} \
+              LoadBalancerType=${{ env.LOAD_BALANCER_TYPE }} \
+            --capabilities CAPABILITY_NAMED_IAM
+  
+      - name: Get Latest Task Definition ARN
+        id: get-task-def
+        run: |
+          TASK_DEF_ARN=$(aws ecs describe-task-definition --task-definition ${{ env.TASK_DEF_NAME }} --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TASK_DEFINITION_ARN=$TASK_DEF_ARN"
+          echo "::set-output name=task_definition_arn::$TASK_DEF_ARN"
+  
+      - name: Get Outputs from Shared Resources Stack
+        id: get-common-outputs
+        run: |
+          outputs=$(aws cloudformation describe-stacks --stack-name ${{ env.ECS_CLUSTER }}-stack --query "Stacks[0].Outputs")
+          echo "::set-output name=alb_security_group_arn::$(echo $outputs | jq -r '.[] | select(.OutputKey == "ALBSecurityGroupArn").OutputValue')"
+          echo "::set-output name=ecs_cluster_arn::$(echo $outputs | jq -r '.[] | select(.OutputKey == "ECSClusterArn").OutputValue')"
+          echo "::set-output name=load_balancer_arn::$(echo $outputs | jq -r '.[] | select(.OutputKey == "LoadBalancerArn").OutputValue')"
+      
+      - name: Ensure Target Group Exists
+        id: ensure-target-group
+        run: |
+          TARGET_GROUP_NAME=${{ env.ECS_SERVICE }}-tg
+          VPC_ID=${{ env.VPC_ID }}
+          CONTAINER_PORT=${{ env.CONTAINER_PORT }}
+          HEALTH_CHECK_PATH=${{ env.HEALTH_CHECK_PATH }}
+      
+          target_group_arn=$(aws --region eu-central-1 elbv2 describe-target-groups --names "$TARGET_GROUP_NAME" --query 'TargetGroups[0].TargetGroupArn' --output text 2>&1 || true)
+          echo "Command output: $target_group_arn"
+          
+          if [[ $target_group_arn == *"TargetGroupNotFound"* || -z $target_group_arn ]]; then
+              echo "Target group not found, creating..."
+              target_group_arn=$(aws --region eu-central-1 elbv2 create-target-group --name "$TARGET_GROUP_NAME" --protocol HTTP --port "$CONTAINER_PORT" --vpc-id "$VPC_ID" --health-check-protocol HTTP --health-check-path "$HEALTH_CHECK_PATH" --target-type ip --query 'TargetGroups[0].TargetGroupArn' --output text 2>&1)
+              echo "Created Target Group ARN: $target_group_arn"
+          else
+              echo "Existing Target Group ARN: $target_group_arn"
+          fi
+      
+          echo "Target Group ARN: $target_group_arn"
+          echo "::set-output name=target_group_arn::$target_group_arn"
+
+      - name: Modify Target Group Attributes
+        run: |
+          TARGET_GROUP_ARN=${{ steps.ensure-target-group.outputs.target_group_arn }}
+          
+          echo '[
+            {
+              "Key": "deregistration_delay.timeout_seconds",
+              "Value": "60"
+            }
+          ]' > attributes.json
+
+          aws elbv2 modify-target-group-attributes --target-group-arn "$TARGET_GROUP_ARN" --attributes "$(cat attributes.json)"
+        if: steps.ensure-target-group.outputs.target_group_arn != ''
+      
+          
+      - name: Find Listener ARNs
+        id: find-listener-arns
+        run: |
+          LOAD_BALANCER_ARN=${{ steps.get-common-outputs.outputs.load_balancer_arn }}
+          TARGET_GROUP_ARN=${{ steps.ensure-target-group.outputs.target_group_arn }}
+          SSL_CERT_ARN=${{ env.SSL_ARN }}
+          
+          # Check for existing HTTP listener
+          http_listener_arn=$(aws --region eu-central-1 elbv2 describe-listeners --load-balancer-arn $LOAD_BALANCER_ARN --query "Listeners[?Protocol=='HTTP'].ListenerArn" --output text 2>&1 || true)
+          if [ -z "$http_listener_arn" ]; then
+              # Create HTTP listener if not exists
+              http_listener_arn=$(aws --region eu-central-1 elbv2 create-listener --load-balancer-arn $LOAD_BALANCER_ARN --protocol HTTP --port 80 --default-actions Type=forward,TargetGroupArn=$TARGET_GROUP_ARN --query 'Listeners[0].ListenerArn' --output text 2>&1)
+          fi
+          
+          # Check for existing HTTPS listener
+          https_listener_arn=$(aws --region eu-central-1 elbv2 describe-listeners --load-balancer-arn $LOAD_BALANCER_ARN --query "Listeners[?Protocol=='HTTPS'].ListenerArn" --output text 2>&1 || true)
+          if [ -z "$https_listener_arn" ]; then
+              # Create HTTPS listener if not exists
+              https_listener_arn=$(aws --region eu-central-1 elbv2 create-listener --load-balancer-arn $LOAD_BALANCER_ARN --protocol HTTPS --port 443 --certificates CertificateArn=$SSL_CERT_ARN --default-actions Type=forward,TargetGroupArn=$TARGET_GROUP_ARN --query 'Listeners[0].ListenerArn' --output text 2>&1)
+          fi
+          
+          echo "::set-output name=http_listener_arn::$http_listener_arn"
+          echo "::set-output name=https_listener_arn::$https_listener_arn"
+        
+      - name: Determine Listener Rule Priority for HTTP Listener
+        id: http-listener-priority
+        run: |
+          http_listener_arn=${{ steps.find-listener-arns.outputs.http_listener_arn }}
+          if [ -n "$http_listener_arn" ]; then
+            echo "HTTP Listener ARN: $http_listener_arn"
+      
+            # Describe rules for the listener and capture the output
+            echo "Describing rules for listener..."
+            describe_output=$(aws --region eu-central-1 elbv2 describe-rules --listener-arn $http_listener_arn --output text 2>&1)
+            describe_exit_code=$?
+            echo "Describe output: $describe_output"
+            echo "AWS CLI Exit Code: $describe_exit_code"
+      
+            if [ $describe_exit_code -ne 0 ]; then
+              echo "Failed to describe listener rules. Exiting with error."
+              exit $describe_exit_code
+            fi
+      
+            # Check if host-header rule exists
+            http_host_header_rule=$(aws --region eu-central-1 elbv2 describe-rules --listener-arn $http_listener_arn --query 'Rules[?Conditions[?Field==`host-header` && Values[0]==`'${{ env.HOST_HEADER }}'`]].RuleArn' --output text 2>&1 || true)
+            echo "HTTP Host-header rule: $http_host_header_rule"
+      
+            # Extract priorities from the output
+            echo "Extracting priorities..."
+            priority_list=$(echo "$describe_output" | awk '/RULES/ && $3 ~ /^[0-9]+$/ {print $3}')
+            echo "Priority list: $priority_list"
+      
+            # Determine the highest priority
+            if [ -z "$priority_list" ]; then
+              echo "No numerical priorities found. Defaulting to priority 1."
+              http_priority=1
+            else
+              highest_priority=$(echo "$priority_list" | sort -nr | head -n1)
+              echo "Current highest priority: $highest_priority"
+              http_priority=$((highest_priority + 1))
+            fi
+      
+            echo "New rule priority will be: $http_priority"
+          fi
+      
+          echo "::set-output name=http_priority::$http_priority"
+          echo "::set-output name=http_host_header_rule::$http_host_header_rule"
+      
+      - name: Determine Listener Rule Priority for HTTPS Listener
+        id: https-listener-priority
+        run: |
+          https_listener_arn=${{ steps.find-listener-arns.outputs.https_listener_arn }}
+          if [ -n "$https_listener_arn" ]; then
+            echo "HTTPS Listener ARN: $https_listener_arn"
+        
+            echo "Describing rules for listener..."
+            describe_output=$(aws --region eu-central-1 elbv2 describe-rules --listener-arn $https_listener_arn --output text 2>&1)
+            describe_exit_code=$?
+            echo "Describe output: $describe_output"
+            echo "AWS CLI Exit Code: $describe_exit_code"
+        
+            if [ $describe_exit_code -ne 0 ]; then
+              echo "Failed to describe listener rules. Exiting with error."
+              exit $describe_exit_code
+            fi
+        
+            https_host_header_rule=$(aws --region eu-central-1 elbv2 describe-rules --listener-arn $https_listener_arn --query 'Rules[?Conditions[?Field==`host-header` && Values[0]==`'${{ env.HOST_HEADER }}'`]].RuleArn' --output text 2>&1 || true)
+            echo "HTTPS Host-header rule: $https_host_header_rule"
+        
+            echo "Extracting priorities..."
+            priority_list=$(echo "$describe_output" | awk '/RULES/ && $3 ~ /^[0-9]+$/ {print $3}')
+            echo "Priority list: $priority_list"
+        
+            if [ -z "$priority_list" ]; then
+              echo "No numerical priorities found. Defaulting to priority 1."
+              https_priority=1
+            else
+              highest_priority=$(echo "$priority_list" | sort -nr | head -n1)
+              echo "Current highest priority: $highest_priority"
+              https_priority=$((highest_priority + 1))
+            fi
+        
+            echo "New rule priority will be: $https_priority"
+          fi  
+          echo "::set-output name=https_priority::$https_priority"
+          echo "::set-output name=https_host_header_rule::$https_host_header_rule"
+        
+            
+        
+      
+      - name: Add Rule to HTTP Listener
+        if: steps.http-listener-priority.outputs.http_host_header_rule == ''
+        run: |
+          http_listener_arn=${{ steps.find-listener-arns.outputs.http_listener_arn }}
+          http_priority=${{ steps.http-listener-priority.outputs.http_priority }}
+          host_header=${{ env.HOST_HEADER }}
+          target_group_arn=${{ steps.ensure-target-group.outputs.target_group_arn }}
+      
+          # Add rule to HTTP listener
+          if [ ! -z "$http_listener_arn" ] && [ ! -z "$http_priority" ]; then
+            aws --region eu-central-1 elbv2 create-rule --listener-arn $http_listener_arn --priority $http_priority --conditions Field=host-header,Values=["$host_header"] --actions Type=forward,TargetGroupArn=$target_group_arn
+          fi
+      
+      - name: Add Rule to HTTPS Listener
+        if: steps.https-listener-priority.outputs.https_host_header_rule == ''
+        run: |
+          https_listener_arn=${{ steps.find-listener-arns.outputs.https_listener_arn }}
+          https_priority=${{ steps.https-listener-priority.outputs.https_priority }}
+          host_header=${{ env.HOST_HEADER }}
+          target_group_arn=${{ steps.ensure-target-group.outputs.target_group_arn }}
+      
+          # Add rule to HTTPS listener
+          if [ ! -z "$https_listener_arn" ] && [ ! -z "$https_priority" ]; then
+            aws --region eu-central-1 elbv2 create-rule --listener-arn $https_listener_arn --priority $https_priority --conditions Field=host-header,Values=["$host_header"] --actions Type=forward,TargetGroupArn=$target_group_arn
+          fi
+      
+      - name: Deploy ECS Service to AWS CloudFormation
+        run: |
+          service_exists=$(aws --region eu-central-1 ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --query 'services[0].serviceName' --output text || true)
+          if [ "$service_exists" == "${{ env.ECS_SERVICE }}" ]; then
+            echo "ECS service already exists, no need to deploy."
+            aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --desired-count 1
+            echo "Desired count updated to 1"
+          else
+            aws cloudformation deploy \
+              --template-file aws/Cloudformation/cf-fargate.yml \
+              --stack-name ${{ env.ECS_SERVICE }}-service-stack \
+              --parameter-overrides \
+                TaskDefinitionArn=${{ steps.get-task-def.outputs.task_definition_arn }} \
+                VPCId=${{ env.VPC_ID }} \
+                ECSServiceName=${{ env.ECS_SERVICE }} \
+                ECSContainerName=${{ env.CONTAINER_NAME }} \
+                ContainerPort=${{ env.CONTAINER_PORT }} \
+                FargateSubnetIds=${{ env.FARGATE_SUBNET_IDS }} \
+                TargetGroupArn=${{ steps.ensure-target-group.outputs.target_group_arn }} \
+                ECSClusterArn=${{ steps.get-common-outputs.outputs.ecs_cluster_arn }} \
+                ALBSecurityGroupArn=${{ steps.get-common-outputs.outputs.alb_security_group_arn }} \
+                DesiredCount=${{ env.DESIRED_COUNT }} \
+              --capabilities CAPABILITY_NAMED_IAM
+          fi 
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true     
+
+    outputs:
+          job_name: ${{ github.job }}
