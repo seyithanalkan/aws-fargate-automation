@@ -5,7 +5,8 @@ FROM nginx
 RUN rm /etc/nginx/conf.d/default.conf
 
 # Copy a new configuration file from the current directory
-COPY nginx.conf /etc/nginx/conf.d/
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
 
 # Create and set content for index.html
 RUN echo "Welcome to nginx!" > /usr/share/nginx/html/index.html
