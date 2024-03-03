@@ -26,7 +26,7 @@ This project automates the deployment of applications to AWS Fargate, utilizing 
    - Go to your GitHub repository's Settings > Secrets.
    - Add AWS credentials and any other necessary environment variables as secrets for GitHub Actions to use in deploying your project to AWS Fargate.
 3. **Customize the CI/CD Pipeline**:
-   - Modify the `.github/workflows/main.yml` to align with your deployment strategy and environment variables.
+   - Modify the `.github/workflows/fargate-deploy.yml` to align with your deployment strategy and environment variables.
    - Use Terraform to set up your AWS network infrastructure by adjusting configurations in the `/terraform` directory as needed.
 
 ### Deployment
