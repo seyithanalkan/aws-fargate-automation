@@ -312,8 +312,8 @@ jobs:
           service_exists=$(aws --region eu-central-1 ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --query 'services[0].serviceName' --output text || true)
           if [ "$service_exists" == "${{ env.ECS_SERVICE }}" ]; then
             echo "ECS service already exists, no need to deploy."
-            aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --desired-count 1
-            echo "Desired count updated to 1"
+            aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --desired-count ${{ env.DESIRED_COUNT }}
+            echo "Desired count updated to DESIRED_COUNT"
           else
             aws cloudformation deploy \
               --template-file aws/Cloudformation/cf-fargate.yml \
@@ -328,7 +328,7 @@ jobs:
                 TargetGroupArn=${{ steps.ensure-target-group.outputs.target_group_arn }} \
                 ECSClusterArn=${{ steps.get-common-outputs.outputs.ecs_cluster_arn }} \
                 ALBSecurityGroupArn=${{ steps.get-common-outputs.outputs.alb_security_group_arn }} \
-                DesiredCount=${{ env.DESIRED_COUNT }} \
+                DesiredCount=0 \
               --capabilities CAPABILITY_NAMED_IAM
           fi 
 
